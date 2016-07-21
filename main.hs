@@ -84,10 +84,12 @@ readReg str = parse r1 $ filter (/=' ') str where
   lit x = isAlpha x || isDigit x
   r1 = (eps >> return Eps) <|> do
     l <- r2
-    v <- optional $ char '-' >> r1
+    v <- optional $ liftM2 (,) (char '-' <|> char '^') r1
     return $ case v of
       Nothing -> l
-      Just r -> And l (Not r)
+      Just (b,r) -> case b of
+        '-' -> And l (Not r)
+        '^' -> Alt (And l (Not r)) (And r (Not l))
   r2 = (eps >> return Eps) <|> do
     l <- r3
     v <- optional $ char '|' >> r2
@@ -138,7 +140,8 @@ readReg str = parse r1 $ filter (/=' ') str where
   set = do
     char '['
     v <- optional $ char '^'
-    xs <- many $ (return <$> isChar lit) <|> do
+    let letter = isChar lit <|> (char '\\' >> isChar (const True))
+    xs <- many $ (return <$> letter) <|> do
       a <- isChar lit
       char '-'
       b <- isChar lit
@@ -163,9 +166,6 @@ data NFA = NFA {
   nAccept :: Int,
   nTransit :: V.Vector (M.Map Char [Int], [Int], [Int]) -- last is eps
 } deriving (Show)
-
-minify :: DFA -> DFA
-minify = id
 
 mapDFA :: (Int -> Int) -> DFA -> DFA
 mapDFA f (DFA l a t) = DFA l (S.map f a) (fmap f' t) where
@@ -347,7 +347,7 @@ sampleString (DFA l a t) = do
     next i c = let (m,f) = t V.! i in case c`M.lookup`m of
       Just j -> j
       Nothing -> f
-    allChars = S.fromList (['A'..'Z'] ++ ['a'..'z'] ++ ['0'..'9']) S.\\ l
+    allChars = S.fromList ('#' : ['A'..'Z'] ++ ['a'..'z'] ++ ['0'..'9']) S.\\ l
     chooseChars = S.toList allChars
     randC = lift $ (chooseChars!!) <$> randomRIO (0,S.size allChars-1)
     proc :: Int -> StateT (V.Vector (Maybe (String -> String)), V.Vector [String -> String]) IO ()
@@ -397,3 +397,62 @@ sample :: String -> IO (Maybe String)
 sample s = case readReg s of
   Nothing -> return Nothing
   Just p -> sampleString (makeDFA p)
+
+minify :: DFA -> DFA
+minify = accessibleDFA . settleDFA
+
+accessibleDFA :: DFA -> DFA
+accessibleDFA dfa@(DFA l a t) = let
+    s = V.length t
+    next i c = let (m,f) = t V.! i in case c`M.lookup`m of
+      Just j -> j
+      Nothing -> f
+    unlet i = let (m,f) = t V.! i in f
+    accessible = execState ?? S.empty $ ($0) $ fix $ \po -> \i -> do
+      v <- use $ contains i
+      case v of
+        True -> return ()
+        False -> do
+          contains i .= True
+          let (m,f) = t V.! i
+          mapM_ po $ S.toList $ S.fromList $ f : M.elems m
+    accList = S.toList accessible
+    adp = M.fromList (zip accList [0..]) `M.union` M.fromList [(i,-1)|i<-[0..s-1]]
+    adm = M.fromList $ zip [0..] accList
+    ads = S.size accessible
+    DFA l' a' t' = mapDFA (adp M.!) dfa
+    a'' = a' S.\\ S.singleton (-1)
+    t'' = V.fromList $ map (\i -> t' V.! (adm M.! i)) [0..ads-1]
+  in DFA l' a'' t''
+
+settleDFA :: DFA -> DFA
+settleDFA dfa@(DFA l a t) = let
+    s = V.length t
+    k = [0..s-1]
+    f = S.toList a
+    kf = S.toList $ S.fromList k S.\\ a
+    d0 = S.fromList [ e | q <- f, q' <- kf, e <- [(q,q'),(q',q)] ]
+    next i c = let (m,f) = t V.! i in case c`M.lookup`m of
+      Just j -> j
+      Nothing -> f
+    unlet i = let (m,f) = t V.! i in f
+    nextD d = S.union d $ S.fromList $ do
+      q <- k
+      q' <- k
+      guard $ (q,q')`S.notMember`d
+      guard $ any (\c -> (next q c, next q' c)`S.member`d) l || (unlet q, unlet q')`S.member`d
+      [(q,q'),(q',q)]
+    dFul = fst $ until (uncurry (==)) (\(x,y) -> (nextD x,x)) (d0,S.empty)
+    (adp,adm,ads) = execState ?? (M.empty,M.empty,0) $ forM k $ \i -> do
+      v <- preuse $ _1 . ix i
+      case v of
+        Just _ -> return ()
+        Nothing -> do
+          p <- use _3
+          _2 . at p .= Just i
+          _3 += 1
+          forM_ (filter (\j -> (i,j)`S.notMember`dFul) k) $ \j -> do
+            _1 . at j .= Just p
+    DFA l' a' t' = mapDFA (adp M.!) dfa
+    t'' = V.fromList $ map (\i -> t' V.! (adm M.! i)) [0..ads-1]
+  in DFA l' a' t''
