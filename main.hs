@@ -104,11 +104,17 @@ readReg str = parse r1 $ filter (/=' ') str where
       Just r -> And l r
   r4 = do
     l <- r5
-    v <- optional r4
+    v <- optional $ char '%' >> r4
+    return $ case v of
+      Nothing -> l
+      Just r -> Seq l (Rep (Seq r l))
+  r5 = do
+    l <- r6
+    v <- optional r5
     return $ case v of
       Nothing -> l
       Just r -> Seq l r
-  r5 = do
+  r6 = do
     e <- elm
     v <- optional $ inSet "*+?{"
     case v of
@@ -128,7 +134,7 @@ readReg str = parse r1 $ filter (/=' ') str where
         return $ case n of
           Nothing -> iterN m (Seq e) Eps
           Just p -> iterN (p-m) (\i -> Alt i (Seq e i)) $ iterN m (Seq e) Eps
-  elm = chi <|> esc <|> any <|> bot <|> set <|> neg <|> do
+  elm = chi <|> esc <|> any <|> bot <|> set <|> neg <|> hav <|> do
     char '('
     e <- r1
     char ')'
@@ -155,6 +161,10 @@ readReg str = parse r1 $ filter (/=' ') str where
     char '!'
     e <- elm
     return $ Not e
+  hav = do
+    char '#'
+    e <- elm
+    return $ Seq (Seq (Rep Any) e) (Rep Any)
 
 data DFA = DFA {
   dLetter :: S.Set Char,
@@ -395,7 +405,7 @@ sampleString (DFA l a t) = do
 
 sample :: String -> IO (Maybe String)
 sample s = case readReg s of
-  Nothing -> return Nothing
+  Nothing -> return $ error "readReg failed"
   Just p -> sampleString (makeDFA p)
 
 minify :: DFA -> DFA
